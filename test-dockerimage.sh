@@ -1,0 +1,1 @@
+docker run --name logging_bot --rm logging_bot

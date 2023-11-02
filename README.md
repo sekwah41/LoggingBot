@@ -1,0 +1,1 @@
+To load the files to the sever, upload them and then run `docker load < logging_bot.tar.gz`.
