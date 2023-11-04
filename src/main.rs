@@ -6,6 +6,7 @@ extern crate lazy_static;
 use serenity::async_trait;
 use serenity::builder::{CreateEmbed, CreateEmbedAuthor};
 use serenity::model::channel::{GuildChannel, Message};
+use serenity::model::channel::Channel::Guild;
 use serenity::model::event::MessageUpdateEvent;
 use serenity::model::gateway::{Activity, Ready};
 use serenity::model::id::{ChannelId, GuildId, MessageId};
@@ -15,6 +16,61 @@ struct Handler;
 
 lazy_static! {
     static ref GUILD: Mutex<Option<GuildId>> = Mutex::new(None);
+    static ref BLACKLIST_CHANNELS: Mutex<Option<Vec<u64>>> = Mutex::new(None);
+}
+
+struct EnvVars<'a> {
+    discord_token: &'a str,
+    log_channel: &'a str,
+    blacklist_channels: &'a str,
+}
+
+const ENV_VARS: EnvVars = EnvVars {
+    discord_token: "discord_token",
+    log_channel: "LOG_CHANNEL",
+    blacklist_channels: "BLACKLIST_CHANNELS",
+};
+
+async fn check_id_blacklist(id: u64) -> bool {
+    let blacklist_channels = BLACKLIST_CHANNELS.lock().await;
+    let blacklist_channels: Option<&Vec<u64>> = blacklist_channels.as_ref();
+
+    match blacklist_channels {
+        Some(blacklist_channels) => {
+            if blacklist_channels.contains(&id) {
+                return true;
+            }
+        }
+        None => (),
+    }
+
+    false
+}
+
+async fn check_channel_blacklist(ctx: &Context, channel_id: ChannelId) -> bool {
+    if check_id_blacklist(channel_id.0).await {
+        return true;
+    }
+
+    match channel_id.to_channel(&ctx).await {
+        Ok(channel) => {
+            let channel = match channel {
+                Guild(channel) => channel,
+                _ => return false,
+            };
+            match channel.parent_id {
+                Some(parent_id) => {
+                    if check_id_blacklist(parent_id.0).await {
+                        return true;
+                    }
+                }
+                None => {}
+            }
+        }
+        Err(_) => {}
+    }
+
+    return false;
 }
 
 #[async_trait]
@@ -26,7 +82,7 @@ impl EventHandler for Handler {
     // Set a handler for the `message` event - so that whenever a new message
     // is received - the closure (or function) passed will be called.
     //
-    // Event handlers are dispatched through a threadpool, and so multiple
+    // Event handlers are dispatched through a thread pool, and so multiple
     // events can be dispatched simultaneously.
     /*async fn message(&self, _ctx: Context, msg: Message) {
     }*/
@@ -46,6 +102,7 @@ impl EventHandler for Handler {
             return;
         }
 
+
         let guild_guard = GUILD.lock().await;
         let guild: Option<&GuildId> = guild_guard.as_ref();
 
@@ -54,11 +111,15 @@ impl EventHandler for Handler {
             None => return,
         };
 
-        if message_guild_id.0 != guild.unwrap().0 {
+        if message_guild_id.as_ref() != guild.unwrap() {
             return;
         }
 
-        let log_channel = env::var("LOG_CHANNEL").expect("Expected a channel id variable LOG_CHANNEL");
+        if check_channel_blacklist(&ctx, channel_id).await {
+            return;
+        }
+
+        let log_channel = env::var(ENV_VARS.log_channel).expect("Expected a channel id variable LOG_CHANNEL");
         let log_channel: u64 = log_channel.parse().unwrap();
         let log_channel = ctx.http.get_channel(log_channel).await;
         let log_channel = match log_channel {
@@ -108,6 +169,29 @@ impl EventHandler for Handler {
             return;
         }
 
+        if check_channel_blacklist(&ctx, event.channel_id).await {
+            return;
+        }
+
+
+        match event.channel_id.to_channel(&ctx).await {
+            Ok(channel) => {
+                let channel = match channel {
+                    Guild(channel) => channel,
+                    _ => return,
+                };
+                match channel.parent_id {
+                    Some(parent_id) => {
+                        if check_id_blacklist(parent_id.0).await {
+                            return;
+                        }
+                    }
+                    None => {}
+                }
+            }
+            Err(_) => {}
+        }
+
         let guild_guard = GUILD.lock().await;
         let guild: Option<&GuildId> = guild_guard.as_ref();
         let message_guild_id = match event.guild_id {
@@ -131,7 +215,7 @@ impl EventHandler for Handler {
             },
         };
 
-        let log_channel = env::var("LOG_CHANNEL").expect("Expected a channel id variable LOG_CHANNEL");
+        let log_channel = env::var(ENV_VARS.log_channel).expect("Expected a channel id variable LOG_CHANNEL");
         // convert string to u64
         let log_channel: u64 = log_channel.parse().unwrap();
         let log_channel = ctx.http.get_channel(log_channel).await;
@@ -177,7 +261,7 @@ impl EventHandler for Handler {
     async fn ready(&self, ctx: Context, ready: Ready) {
         println!("{} is connected!", ready.user.name);
 
-        let log_channel = env::var("LOG_CHANNEL").expect("Expected a channel id variable LOG_CHANNEL");
+        let log_channel = env::var(ENV_VARS.log_channel).expect("Expected a channel id variable LOG_CHANNEL");
         // convert string to u64
         let log_channel: u64 = log_channel.parse().unwrap();
         let log_channel = ctx.http.get_channel(log_channel).await;
@@ -206,8 +290,25 @@ impl EventHandler for Handler {
 #[tokio::main]
 async fn main() {
 
-    let token = env::var("DISCORD_TOKEN").expect("Expected a token in the environment variable DISCORD_TOKEN");
-    let _ = env::var("LOG_CHANNEL").expect("Expected a channel id variable LOG_CHANNEL");
+    let token = env::var(ENV_VARS.discord_token).expect("Expected a token in the environment variable discord_token");
+    let _ = env::var(ENV_VARS.log_channel).expect("Expected a channel id variable LOG_CHANNEL");
+
+    if let Ok(blacklist) = env::var(ENV_VARS.blacklist_channels) {
+        let channels: Result<Vec<u64>, _> = blacklist
+            .split(',')
+            .map(|segment| segment.trim().parse::<u64>().map_err(|e| format!("Failed to parse segment: {}", e)))
+            .collect();
+
+        match channels {
+            Ok(channels) => {
+                let mut blacklist_channels = BLACKLIST_CHANNELS.lock().await;
+                *blacklist_channels = Some(channels);
+            }
+            _ => {}
+        }
+    }
+
+    println!("Starting bot");
 
     let intents = GatewayIntents::GUILD_MESSAGES
         | GatewayIntents::DIRECT_MESSAGES

@@ -3,5 +3,7 @@ services:
   discord_bot:
     image: logging_bot:latest
     environment:
-      - DISCORD_TOKEN=token
+      - DISCORD_TOKEN=${DISCORD_TOKEN}
+      - LOG_CHANNEL=${DISCORD_TOKEN}
+      - BLACKLIST_CHANNELS=${BLACKLIST_CHANNELS}
     restart: unless-stopped
