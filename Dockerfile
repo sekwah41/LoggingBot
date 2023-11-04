@@ -1,8 +1,19 @@
-# Can be built in the image though it'll be faster and possible to cache deps.
+FROM rust:alpine AS chef
+WORKDIR build
+RUN \
+  apk add --no-cache build-base openssl-dev; \
+  cargo install cargo-chef
 
-FROM debian:bookworm-slim
-COPY target/release/logging_bot /usr/local/bin/logging_bot
-# https://pkgs.alpinelinux.org/packages
-#RUN apk add --update util-linux
-RUN apt-get update && rm -rf /var/lib/apt/lists/*
-CMD logging_bot
+FROM chef AS planner
+COPY . .
+RUN cargo chef prepare --recipe-path recipe.json
+
+FROM chef AS builder
+COPY --from=planner /build/recipe.json recipe.json
+RUN  cargo chef cook --release
+COPY . .
+RUN cargo build --release
+
+FROM alpine
+COPY --from=builder /build/target/release/logging_bot /logging_bot
+CMD /logging_bot
